@@ -3,72 +3,53 @@ EXTENDS TLC, Integers, Sequences, FiniteSets
 
 CONSTANTS
     Acceptors,
-    SeedAcceptor,
     Proposers,
-    MaxEpoch,
-    
-    Config,
-
-    Epoch,
     Proposed,
-    Accepted
-    
-ASSUME SeedAcceptor \in Acceptors
-
-ASSUME MaxEpoch \in Nat
-Range(f) == { f[x]: x \in DOMAIN f }
+    Accepted,
+    Values,
+    None
 
 (*--algorithm paxregister
 
 variable
-    propose_requests = [ a \in Acceptors |-> <<>> ],
-    propose_responses = [ a \in Proposers |-> <<>> ],
-    active_proposers = Proposers;
+    proposer_msgs = {}, \* produced by proposers
+    acceptor_msgs = {}, \* produced by acceptors
+
+procedure SendProposerMsg(type, number, value) begin
+Send:
+    proposer_msgs := proposer_msgs \cup [ type |-> type, number |-> number, value |-> value ]
+end procedure
 
 process proposer \in Proposers
 variables
-   epoch = 1,
-   prop,
-begin Run:
-while epoch <= MaxEpoch do
-    StartNewWrite:
-        prop := 1;
-        goto SendProposeRequest;
-    SendProposeRequest:
-        with new_proposers \in {s \in SUBSET Proposers: Cardinality(s) > 0} do
-            propose_requests[SeedAcceptor] := Append(propose_requests[SeedAcceptor], [ Proposed |-> prop, Epoch |-> epoch+1, Config |-> new_proposers ]);
-        end with;
-    HandleProposeResponse:
-        await propose_responses[self] /= {};
-        with resp \in Range(propose_responses[self]) do
-            skip;
-        end with;
-            skip;
-        skip;
+    prop = 1,
+    current_value = None
+begin  d
+Run:
+while Cardinality(Values) /= 0 do
+    either
+        await current_value = None; \* only start new after finishing old
+        current_value := CHOOSE v \in Values: TRUE; \* allow others to chose same value
+    or
+        await current_value /= None;
+        prop := SendProposerMsg(<<"promise", prop, None>>); \* phase 1
+    or
+        skip \* prop := HandlePromiseResponse(self)
+    end either;
 end while;
+Accept:
+    skip;
 end process;
 
 
 process acceptor \in Acceptors
 variables
-    state = [
-        Epoch         |-> IF self = SeedAcceptor THEN 1 ELSE 0,
-        Proposed      |-> IF self = SeedAcceptor THEN 1 ELSE 0,
-        Accepted      |-> IF self = SeedAcceptor THEN 1 ELSE 0,
-        NextAcceptors |-> IF self = SeedAcceptor THEN {self} ELSE {}   
-    ]
+    promised = 0,
+    accepted = 0,
+    value
 begin
 HandlePropose:
-while active_proposers /= {} do
-    HandleProposeRequest:
-        skip;
-    HandleProposeResponse:
-    await propose_requests[self] /= {};
-    with req \in Range(propose_requests[self]) do
-        \* TODO(tbg): remove req from the vector. Surprisingly hard.
-        with 
-    end with;
-HandleAccept:
+while TRUE do
     skip;
 end while;
 end process;
@@ -77,100 +58,86 @@ end process;
 
 end algorithm; *)
 \* BEGIN TRANSLATION
+\* Process variable value of process acceptor at line 49 col 5 changed to value_
 CONSTANT defaultInitValue
-VARIABLES propose_requests, propose_responses, active_proposers, pc, epoch, 
-          prop, state
+VARIABLES proposer_msgs, acceptor_msgs, pc, stack, type, number, value, prop, 
+          current_value, promised, accepted, value_
 
-vars == << propose_requests, propose_responses, active_proposers, pc, epoch, 
-           prop, state >>
+vars == << proposer_msgs, acceptor_msgs, pc, stack, type, number, value, prop, 
+           current_value, promised, accepted, value_ >>
 
 ProcSet == (Proposers) \cup (Acceptors)
 
 Init == (* Global variables *)
-        /\ propose_requests = [ a \in Acceptors |-> <<>> ]
-        /\ propose_responses = [ a \in Proposers |-> <<>> ]
-        /\ active_proposers = Proposers
+        /\ proposer_msgs = {}
+        /\ acceptor_msgs = {}
+        (* Procedure SendProposerMsg *)
+        /\ type = [ self \in ProcSet |-> defaultInitValue]
+        /\ number = [ self \in ProcSet |-> defaultInitValue]
+        /\ value = [ self \in ProcSet |-> defaultInitValue]
         (* Process proposer *)
-        /\ epoch = [self \in Proposers |-> 1]
-        /\ prop = [self \in Proposers |-> defaultInitValue]
+        /\ prop = [self \in Proposers |-> 1]
+        /\ current_value = [self \in Proposers |-> None]
         (* Process acceptor *)
-        /\ state = [self \in Acceptors |->         [
-                                               Epoch         |-> IF self = SeedAcceptor THEN 1 ELSE 0,
-                                               Proposed      |-> IF self = SeedAcceptor THEN 1 ELSE 0,
-                                               Accepted      |-> IF self = SeedAcceptor THEN 1 ELSE 0,
-                                               NextAcceptors |-> IF self = SeedAcceptor THEN {self} ELSE {}
-                                           ]]
+        /\ promised = [self \in Acceptors |-> 0]
+        /\ accepted = [self \in Acceptors |-> 0]
+        /\ value_ = [self \in Acceptors |-> defaultInitValue]
+        /\ stack = [self \in ProcSet |-> << >>]
         /\ pc = [self \in ProcSet |-> CASE self \in Proposers -> "Run"
                                         [] self \in Acceptors -> "HandlePropose"]
 
+Send(self) == /\ pc[self] = "Send"
+              /\ proposer_msgs' = (proposer_msgs \cup [ type |-> type[self], number |-> number[self], value |-> value[self] ])
+              /\ pc' = [pc EXCEPT ![self] = "Error"]
+              /\ UNCHANGED << acceptor_msgs, stack, type, number, value, prop, 
+                              current_value, promised, accepted, value_ >>
+
+SendProposerMsg(self) == Send(self)
+
 Run(self) == /\ pc[self] = "Run"
-             /\ IF epoch[self] <= MaxEpoch
-                   THEN /\ pc' = [pc EXCEPT ![self] = "StartNewWrite"]
-                   ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
-             /\ UNCHANGED << propose_requests, propose_responses, 
-                             active_proposers, epoch, prop, state >>
+             /\ IF Cardinality(Values) /= 0
+                   THEN /\ \/ /\ current_value[self] = None
+                              /\ current_value' = [current_value EXCEPT ![self] = CHOOSE v \in Values: TRUE]
+                              /\ prop' = prop
+                           \/ /\ current_value[self] /= None
+                              /\ prop' = [prop EXCEPT ![self] = SendProposerMsg(<<"promise", prop[self], None>>)]
+                              /\ UNCHANGED current_value
+                           \/ /\ TRUE
+                              /\ UNCHANGED <<prop, current_value>>
+                        /\ pc' = [pc EXCEPT ![self] = "Run"]
+                   ELSE /\ pc' = [pc EXCEPT ![self] = "Accept"]
+                        /\ UNCHANGED << prop, current_value >>
+             /\ UNCHANGED << proposer_msgs, acceptor_msgs, stack, type, number, 
+                             value, promised, accepted, value_ >>
 
-StartNewWrite(self) == /\ pc[self] = "StartNewWrite"
-                       /\ prop' = [prop EXCEPT ![self] = 1]
-                       /\ pc' = [pc EXCEPT ![self] = "SendProposeRequest"]
-                       /\ UNCHANGED << propose_requests, propose_responses, 
-                                       active_proposers, epoch, state >>
+Accept(self) == /\ pc[self] = "Accept"
+                /\ TRUE
+                /\ pc' = [pc EXCEPT ![self] = "Done"]
+                /\ UNCHANGED << proposer_msgs, acceptor_msgs, stack, type, 
+                                number, value, prop, current_value, promised, 
+                                accepted, value_ >>
 
-SendProposeRequest(self) == /\ pc[self] = "SendProposeRequest"
-                            /\ \E new_proposers \in {s \in SUBSET Proposers: Cardinality(s) > 0}:
-                                 propose_requests' = [propose_requests EXCEPT ![SeedAcceptor] = Append(propose_requests[SeedAcceptor], [ Proposed |-> prop[self], Epoch |-> epoch[self]+1, Config |-> new_proposers ])]
-                            /\ pc' = [pc EXCEPT ![self] = "HandleProposeResponse"]
-                            /\ UNCHANGED << propose_responses, 
-                                            active_proposers, epoch, prop, 
-                                            state >>
-
-HandleProposeResponse(self) == /\ pc[self] = "HandleProposeResponse"
-                               /\ propose_responses[self] /= {}
-                               /\ \E resp \in Range(propose_responses[self]):
-                                    TRUE
-                               /\ TRUE
-                               /\ TRUE
-                               /\ pc' = [pc EXCEPT ![self] = "Run"]
-                               /\ UNCHANGED << propose_requests, 
-                                               propose_responses, 
-                                               active_proposers, epoch, prop, 
-                                               state >>
-
-proposer(self) == Run(self) \/ StartNewWrite(self)
-                     \/ SendProposeRequest(self)
-                     \/ HandleProposeResponse(self)
+proposer(self) == Run(self) \/ Accept(self)
 
 HandlePropose(self) == /\ pc[self] = "HandlePropose"
-                       /\ IF active_proposers /= {}
-                             THEN /\ propose_requests[self] /= {}
-                                  /\ \E req \in Range(propose_requests[self]):
-                                       state' = [state EXCEPT ![self][Epoch] = IF TRUE THEN FALSE ELSE TRUE]
-                                  /\ pc' = [pc EXCEPT ![self] = "HandleAccept"]
-                             ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
-                                  /\ state' = state
-                       /\ UNCHANGED << propose_requests, propose_responses, 
-                                       active_proposers, epoch, prop >>
+                       /\ TRUE
+                       /\ pc' = [pc EXCEPT ![self] = "HandlePropose"]
+                       /\ UNCHANGED << proposer_msgs, acceptor_msgs, stack, 
+                                       type, number, value, prop, 
+                                       current_value, promised, accepted, 
+                                       value_ >>
 
-HandleAccept(self) == /\ pc[self] = "HandleAccept"
-                      /\ TRUE
-                      /\ pc' = [pc EXCEPT ![self] = "HandlePropose"]
-                      /\ UNCHANGED << propose_requests, propose_responses, 
-                                      active_proposers, epoch, prop, state >>
+acceptor(self) == HandlePropose(self)
 
-acceptor(self) == HandlePropose(self) \/ HandleAccept(self)
-
-Next == (\E self \in Proposers: proposer(self))
+Next == (\E self \in ProcSet: SendProposerMsg(self))
+           \/ (\E self \in Proposers: proposer(self))
            \/ (\E self \in Acceptors: acceptor(self))
-           \/ (* Disjunct to prevent deadlock on termination *)
-              ((\A self \in ProcSet: pc[self] = "Done") /\ UNCHANGED vars)
 
 Spec == Init /\ [][Next]_vars
-
-Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 \* END TRANSLATION
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Jan 18 11:15:54 CET 2019 by tschottdorf
+\* Last modified Fri Jan 18 12:19:35 CET 2019 by tschottdorf
 \* Created Thu Jan 17 22:09:15 CET 2019 by tschottdorf
